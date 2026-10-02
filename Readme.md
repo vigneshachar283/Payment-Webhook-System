@@ -1,7 +1,3 @@
-Absolutely. Since the project is **still under development**, the README should document what is currently implemented without falsely claiming Redis, RabbitMQ, Outbox, or 500-event testing are already complete.
-
-You can put this in `README.md` at the project root:
-
 ```markdown
 # Idempotent Payment Webhook Processing System
 
@@ -724,9 +720,6 @@ The system should be designed around **idempotency, durable state, asynchronous 
 
 **Vignesh**
 
-Computer Science & Engineering Student
 
-RNS Institute of Technology
 ```
 
-One recommendation: **don't put "exactly-once processing" as an absolute claim in the README**. The safer engineering claim is **"exactly-once business effects backed by database constraints/idempotency"**, because distributed systems can have at-least-once message delivery. We'll make that distinction clearer when we implement RabbitMQ.
