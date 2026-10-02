@@ -15,3 +15,15 @@ model Order {
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 }
+
+
+model WebhookEvent {
+  id          Int      @id @default(autoincrement())
+  eventId     String   @unique
+  type        String
+  status      String   @default("RECEIVED")
+  payload     Json
+  receivedAt  DateTime @default(now())
+  processedAt DateTime?
+  error       String?
+}
