@@ -1,13 +1,12 @@
 import express from "express";
 import dotenv from "dotenv";
+import Stripe from "stripe";
 import { prisma } from "./db.js";
 import { stripe } from "./stripe.js";
 
 dotenv.config();
 
 const app = express();
-
-
 
 
 app.post(
@@ -20,7 +19,7 @@ app.post(
       return res.status(400).send("Missing Stripe signature");
     }
 
-    let event;
+    let event: Stripe.Event;
 
     try {
       event = stripe.webhooks.constructEvent(
@@ -29,19 +28,44 @@ app.post(
         process.env.STRIPE_WEBHOOK_SECRET!
       );
     } catch (error) {
-      console.error("Stripe webhook signature verification failed:", error);
+      console.error("Webhook signature verification failed:", error);
 
       return res.status(400).send("Invalid webhook signature");
     }
 
-    console.log("Verified Stripe event:", event.id, event.type);
+    console.log(
+      "Verified Stripe event:",
+      event.id,
+      event.type
+    );
 
-    return res.json({
-      received: true,
-    });
+    try {
+      const webhookEvent = await prisma.webhookEvent.create({
+        data: {
+          eventId: event.id,
+          type: event.type,
+          status: "RECEIVED",
+          payload: JSON.parse(JSON.stringify(event)),
+        },
+      });
+
+      console.log(
+        "Webhook event saved:",
+        webhookEvent.eventId
+      );
+
+      return res.json({
+        received: true,
+      });
+    } catch (error) {
+      console.error("Failed to save webhook event:", error);
+
+      return res.status(500).json({
+        error: "Failed to save webhook event",
+      });
+    }
   }
 );
-
 
 app.use(express.json());
 
