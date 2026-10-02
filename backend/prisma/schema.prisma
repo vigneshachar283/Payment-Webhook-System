@@ -1,0 +1,17 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Order {
+  id                Int      @id @default(autoincrement())
+  amount            Int
+  currency          String   @default("INR")
+  status            String   @default("PENDING")
+  providerPaymentId String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
