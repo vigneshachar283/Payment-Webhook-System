@@ -652,23 +652,23 @@ The project explores failures caused by:
 
 - [x] WebhookEvent table
 - [x] Unique event ID
-- [ ] Duplicate event handling
-- [ ] Redis fast-path duplicate detection
-- [ ] Exactly-once business effects backed by database constraints
+- [x] Duplicate event handling
+- [x] Redis fast-path duplicate detection
+- [x] Exactly-once business effects backed by database constraints
 
 ### Phase 4 — Async Processing
 
-- [ ] RabbitMQ
-- [ ] Exchanges
-- [ ] Queues
-- [ ] Routing keys
-- [ ] Worker
-- [ ] Acknowledgements
-- [ ] Durable messages
+- [x] RabbitMQ
+- [x] Exchanges
+- [x] Queues
+- [x] Routing keys
+- [x] Worker
+- [x] Acknowledgements
+- [x] Durable messages
 
 ### Phase 5 — Reliability
 
-- [ ] Retry mechanism
+- [x] Retry mechanism
 - [ ] Failed state
 - [ ] Dead-letter handling
 - [ ] Event replay
