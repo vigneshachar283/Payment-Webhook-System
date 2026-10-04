@@ -54,27 +54,123 @@ This project is designed to prevent those duplicate business effects.
 ### Current implementation
 
 ```text
-                 ┌──────────────┐
-                 │    Stripe    │
-                 └──────┬───────┘
-                        │
-                        │ Webhook
-                        ▼
-              ┌───────────────────┐
-              │   Node.js API     │
-              │     Express       │
-              └─────────┬─────────┘
-                        │
-                 Signature Check
-                        │
-                        ▼
-              ┌───────────────────┐
-              │    PostgreSQL     │
-              │      Prisma       │
-              └───────────────────┘
-                        │
-                        ▼
-                 WebhookEvent
+                                          ┌──────────────────┐
+                         │      Client      │
+                         │  Create Order    │
+                         └────────┬─────────┘
+                                  │
+                                  ▼
+                         ┌──────────────────┐
+                         │   Express API    │
+                         │   Node.js + TS   │
+                         └────────┬─────────┘
+                                  │
+                         POST /api/orders
+                                  │
+                                  ▼
+                         ┌──────────────────┐
+                         │    PostgreSQL    │
+                         │   Order=PENDING  │
+                         └────────┬─────────┘
+                                  │
+                                  ▼
+                      POST /payments/checkout
+                                  │
+                                  ▼
+                         ┌──────────────────┐
+                         │ Stripe Checkout  │
+                         │     Session      │
+                         └────────┬─────────┘
+                                  │
+                              Payment
+                                  │
+                                  ▼
+                         ┌──────────────────┐
+                         │      Stripe      │
+                         └────────┬─────────┘
+                                  │
+                   checkout.session.completed
+                                  │
+                                  ▼
+                  ┌──────────────────────────┐
+                  │  POST /webhooks/stripe   │
+                  │                          │
+                  │  Verify Stripe Signature │
+                  └────────────┬─────────────┘
+                               │
+                               ▼
+                    ┌─────────────────────┐
+                    │        Redis        │
+                    │                     │
+                    │  SET webhook:event  │
+                    │      NX + TTL       │
+                    └──────────┬──────────┘
+                               │
+                    ┌──────────┴──────────┐
+                    │                     │
+                Duplicate               New
+                    │                     │
+                    ▼                     ▼
+             ┌─────────────┐     ┌─────────────────┐
+             │ Return 200  │     │   PostgreSQL    │
+             │  Duplicate  │     │  WebhookEvent   │
+             └─────────────┘     │ status=RECEIVED │
+                                 └────────┬────────┘
+                                          │
+                                          ▼
+                              ┌──────────────────────┐
+                              │       RabbitMQ       │
+                              │                      │
+                              │ payment-webhooks     │
+                              │     Main Queue       │
+                              └──────────┬───────────┘
+                                         │
+                                  ACK webhook
+                                  quickly to Stripe
+                                         │
+                                         ▼
+                              ┌──────────────────────┐
+                              │  Background Worker   │
+                              └──────────┬───────────┘
+                                         │
+                                Process Payment Job
+                                         │
+                           ┌─────────────┴─────────────┐
+                           │                           │
+                        SUCCESS                     FAILURE
+                           │                           │
+                           ▼                           ▼
+                ┌─────────────────────┐     ┌────────────────────┐
+                │     PostgreSQL      │     │    Retry Queue     │
+                │                     │     │                    │
+                │ Order → PAID        │     │   Wait 5 seconds   │
+                │ Webhook → PROCESSED │     └─────────┬──────────┘
+                └──────────┬──────────┘               │
+                           │                           ▼
+                           │                    Main Queue Again
+                           │                           │
+                           │                      Retry Worker
+                           │                           │
+                           │                    Maximum 3 retries
+                           │                           │
+                           │              ┌────────────┴───────────┐
+                           │              │                        │
+                           │           SUCCESS                   FAILURE
+                           │              │                        │
+                           │              ▼                        ▼
+                           │         Processed              ┌─────────────┐
+                           │                                │     DLQ     │
+                           │                                │ Dead Letter │
+                           │                                │    Queue    │
+                           │                                └─────────────┘
+                           │
+                           ▼
+                  ┌─────────────────┐
+                  │      Redis      │
+                  │                 │
+                  │    processed    │
+                  │   TTL = 24 hrs  │
+                  └─────────────────┘
 ```
 
 ### Planned final architecture
