@@ -3,6 +3,7 @@ import dotenv from "dotenv";
 import Stripe from "stripe";
 import { prisma } from "./db.js";
 import { stripe } from "./stripe.js";
+import { redis } from "./redis.js";
 
 dotenv.config();
 
@@ -29,9 +30,14 @@ app.post(
         process.env.STRIPE_WEBHOOK_SECRET!
       );
     } catch (error) {
-      console.error("Webhook signature verification failed:", error);
+      console.error(
+        "Webhook signature verification failed:",
+        error
+      );
 
-      return res.status(400).send("Invalid webhook signature");
+      return res.status(400).send(
+        "Invalid webhook signature"
+      );
     }
 
     console.log(
@@ -40,58 +46,99 @@ app.post(
       event.type
     );
 
-    try {
-      // 2. Store webhook event
-      const webhookEvent = await prisma.webhookEvent.create({
-        data: {
-          eventId: event.id,
-          type: event.type,
-          status: "RECEIVED",
-          payload: JSON.parse(JSON.stringify(event)),
-        },
+    // 2. Redis idempotency
+    const idempotencyKey = `webhook:${event.id}`;
+
+    const acquired = await redis.set(
+      idempotencyKey,
+      "processing",
+      "EX",
+      86400,
+      "NX"
+    );
+
+    if (acquired === null) {
+      console.log(
+        "Duplicate webhook detected by Redis:",
+        event.id
+      );
+
+      return res.json({
+        received: true,
+        duplicate: true,
       });
+    }
+
+    console.log(
+      "New webhook accepted by Redis:",
+      event.id
+    );
+
+    try {
+      // 3. Store webhook event
+      const webhookEvent =
+        await prisma.webhookEvent.create({
+          data: {
+            eventId: event.id,
+            type: event.type,
+            status: "RECEIVED",
+            payload: JSON.parse(
+              JSON.stringify(event)
+            ),
+          },
+        });
 
       console.log(
         "Webhook event saved:",
         webhookEvent.eventId
       );
 
-      // 3. Process checkout completion
-      if (event.type === "checkout.session.completed") {
-        const session = event.data.object as Stripe.Checkout.Session;
+      // 4. Process successful checkout
+      if (
+        event.type ===
+        "checkout.session.completed"
+      ) {
+        const session =
+          event.data.object as Stripe.Checkout.Session;
 
-        const orderId = session.metadata?.orderId;
+        const orderId =
+          session.metadata?.orderId;
 
         if (!orderId) {
-          console.error("No orderId found in Stripe session metadata");
-
           await prisma.webhookEvent.update({
             where: {
               eventId: event.id,
             },
             data: {
               status: "FAILED",
-              error: "Missing orderId in Stripe session metadata",
+              error:
+                "Missing orderId in Stripe session metadata",
             },
           });
+
+          await redis.del(idempotencyKey);
 
           return res.status(400).json({
             error: "Missing orderId",
           });
         }
 
-        // 4. Update order
+        // 5. Update order
         await prisma.order.update({
           where: {
             id: Number(orderId),
           },
           data: {
             status: "PAID",
-            providerPaymentId: session.payment_intent as string | null,
+            providerPaymentId:
+              typeof session.payment_intent ===
+              "string"
+                ? session.payment_intent
+                : null,
           },
         });
 
-        // 5. Mark webhook as processed
+        // 6. Mark webhook processed
         await prisma.webhookEvent.update({
           where: {
             eventId: event.id,
@@ -113,10 +160,10 @@ app.post(
 
     } catch (error: any) {
 
-      // Duplicate webhook
+      // PostgreSQL duplicate protection
       if (error?.code === "P2002") {
         console.log(
-          "Duplicate webhook ignored:",
+          "Duplicate webhook detected by PostgreSQL:",
           event.id
         );
 
@@ -125,6 +172,9 @@ app.post(
           duplicate: true,
         });
       }
+
+      // Release Redis lock if processing failed
+      await redis.del(idempotencyKey);
 
       console.error(
         "Failed to process webhook:",
@@ -137,6 +187,7 @@ app.post(
     }
   }
 );
+
 
 app.use(express.json());
 
@@ -241,6 +292,17 @@ app.post("/api/payments/checkout", async (req, res) => {
     });
   }
 });
+
+
+
+redis
+  .ping()
+  .then((result) => {
+    console.log("Redis ping:", result);
+  })
+  .catch((error) => {
+    console.error("Redis ping failed:", error);
+  });
 
 const PORT = 4000;
 

@@ -11,5 +11,18 @@ services:
     volumes:
       - payment_pgdata:/var/lib/postgresql/data
 
+  redis:
+    image: redis:7
+    container_name: payment-redis
+    ports:
+      - "6379:6379"
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: payment-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
 volumes:
   payment_pgdata:
