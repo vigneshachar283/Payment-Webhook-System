@@ -209,25 +209,27 @@ This project is designed to prevent those duplicate business effects.
 payment-webhook-system/
 │
 ├── docker-compose.yml
+├── README.md
 │
-├── backend/
-│   │
-│   ├── prisma/
-│   │   ├── migrations/
-│   │   └── schema.prisma
-│   │
-│   ├── src/
-│   │   ├── db.ts
-│   │   ├── server.ts
-│   │   └── stripe.ts
-│   │
-│   ├── .env
-│   ├── package.json
-│   ├── package-lock.json
-│   ├── prisma.config.ts
-│   └── tsconfig.json
-│
-└── README.md
+└── backend/
+    │
+    ├── prisma/
+    │   ├── migrations/
+    │   └── schema.prisma
+    │
+    ├── src/
+    │   ├── db.ts
+    │   ├── server.ts
+    │   ├── stripe.ts
+    │   ├── redis.ts
+    │   ├── rabbitmq.ts
+    │   └── worker.ts
+    │
+    ├── .env
+    ├── package.json
+    ├── package-lock.json
+    ├── prisma.config.ts
+    └── tsconfig.json
 ```
 
 ---
