@@ -4,11 +4,41 @@ import Stripe from "stripe";
 import { prisma } from "./db.js";
 import { stripe } from "./stripe.js";
 import { redis } from "./redis.js";
+import {
+  connectRabbitMQ,
+  getRabbitChannel,
+  QUEUE_NAME,
+} from "./rabbitmq.js";
 
 dotenv.config();
 
 const app = express();
 
+const PORT = 4000;
+
+/*
+|--------------------------------------------------------------------------
+| Stripe Webhook
+|--------------------------------------------------------------------------
+|
+| Flow:
+|
+| Stripe
+|   ↓
+| Signature verification
+|   ↓
+| Redis idempotency
+|   ↓
+| PostgreSQL WebhookEvent
+|   ↓
+| RabbitMQ
+|   ↓
+| Return 200
+|
+| The actual payment processing is handled by worker.ts.
+|
+|--------------------------------------------------------------------------
+*/
 
 app.post(
   "/api/webhooks/stripe",
@@ -16,13 +46,14 @@ app.post(
   async (req, res) => {
     const signature = req.headers["stripe-signature"];
 
+    // 1. Check Stripe signature
     if (!signature) {
       return res.status(400).send("Missing Stripe signature");
     }
 
     let event: Stripe.Event;
 
-    // 1. Verify Stripe signature
+    // 2. Verify Stripe webhook signature
     try {
       event = stripe.webhooks.constructEvent(
         req.body,
@@ -35,9 +66,7 @@ app.post(
         error
       );
 
-      return res.status(400).send(
-        "Invalid webhook signature"
-      );
+      return res.status(400).send("Invalid webhook signature");
     }
 
     console.log(
@@ -46,7 +75,12 @@ app.post(
       event.type
     );
 
-    // 2. Redis idempotency
+    /*
+    |--------------------------------------------------------------------------
+    | Redis Idempotency
+    |--------------------------------------------------------------------------
+    */
+
     const idempotencyKey = `webhook:${event.id}`;
 
     const acquired = await redis.set(
@@ -57,6 +91,7 @@ app.post(
       "NX"
     );
 
+    // Event already received
     if (acquired === null) {
       console.log(
         "Duplicate webhook detected by Redis:",
@@ -75,7 +110,12 @@ app.post(
     );
 
     try {
-      // 3. Store webhook event
+      /*
+      |--------------------------------------------------------------------------
+      | Store webhook event in PostgreSQL
+      |--------------------------------------------------------------------------
+      */
+
       const webhookEvent =
         await prisma.webhookEvent.create({
           data: {
@@ -93,7 +133,12 @@ app.post(
         webhookEvent.eventId
       );
 
-      // 4. Process successful checkout
+      /*
+      |--------------------------------------------------------------------------
+      | Handle Checkout Completion
+      |--------------------------------------------------------------------------
+      */
+
       if (
         event.type ===
         "checkout.session.completed"
@@ -104,7 +149,12 @@ app.post(
         const orderId =
           session.metadata?.orderId;
 
+        // Make sure Stripe session contains our order ID
         if (!orderId) {
+          console.error(
+            "No orderId found in Stripe session metadata"
+          );
+
           await prisma.webhookEvent.update({
             where: {
               eventId: event.id,
@@ -116,6 +166,7 @@ app.post(
             },
           });
 
+          // Allow a future retry
           await redis.del(idempotencyKey);
 
           return res.status(400).json({
@@ -123,44 +174,64 @@ app.post(
           });
         }
 
-        // 5. Update order
-        await prisma.order.update({
-          where: {
-            id: Number(orderId),
-          },
-          data: {
-            status: "PAID",
-            providerPaymentId:
-              typeof session.payment_intent ===
-              "string"
-                ? session.payment_intent
-                : null,
-          },
-        });
+        /*
+        |--------------------------------------------------------------------------
+        | Publish Payment Job to RabbitMQ
+        |--------------------------------------------------------------------------
+        */
 
-        // 6. Mark webhook processed
-        await prisma.webhookEvent.update({
-          where: {
-            eventId: event.id,
-          },
-          data: {
-            status: "PROCESSED",
-            processedAt: new Date(),
-          },
-        });
+        const channel = getRabbitChannel();
+
+        const paymentJob = {
+          eventId: event.id,
+          orderId,
+          paymentIntentId:
+            typeof session.payment_intent === "string"
+              ? session.payment_intent
+              : null,
+        };
+
+        channel.sendToQueue(
+          QUEUE_NAME,
+          Buffer.from(
+            JSON.stringify(paymentJob)
+          ),
+          {
+            persistent: true,
+          }
+        );
 
         console.log(
-          `Order ${orderId} marked as PAID`
+          `Payment job queued for order ${orderId}`
         );
       }
 
+      /*
+      |--------------------------------------------------------------------------
+      | Respond to Stripe
+      |--------------------------------------------------------------------------
+      |
+      | IMPORTANT:
+      | We do NOT mark the event as PROCESSED here.
+      |
+      | The worker will mark it PROCESSED after
+      | successfully updating the order.
+      |
+      |--------------------------------------------------------------------------
+      */
+
       return res.json({
         received: true,
+        queued: true,
       });
 
     } catch (error: any) {
+      /*
+      |--------------------------------------------------------------------------
+      | PostgreSQL Duplicate Protection
+      |--------------------------------------------------------------------------
+      */
 
-      // PostgreSQL duplicate protection
       if (error?.code === "P2002") {
         console.log(
           "Duplicate webhook detected by PostgreSQL:",
@@ -173,7 +244,16 @@ app.post(
         });
       }
 
-      // Release Redis lock if processing failed
+      /*
+      |--------------------------------------------------------------------------
+      | Processing Failed
+      |--------------------------------------------------------------------------
+      |
+      | Remove Redis lock so Stripe can retry the event.
+      |
+      |--------------------------------------------------------------------------
+      */
+
       await redis.del(idempotencyKey);
 
       console.error(
@@ -188,14 +268,36 @@ app.post(
   }
 );
 
+/*
+|--------------------------------------------------------------------------
+| JSON Middleware
+|--------------------------------------------------------------------------
+|
+| This comes AFTER the Stripe webhook because Stripe requires
+| the raw request body for signature verification.
+|
+|--------------------------------------------------------------------------
+*/
 
 app.use(express.json());
+
+/*
+|--------------------------------------------------------------------------
+| Health Check
+|--------------------------------------------------------------------------
+*/
 
 app.get("/health", (req, res) => {
   res.json({
     status: "ok",
   });
 });
+
+/*
+|--------------------------------------------------------------------------
+| Create Order
+|--------------------------------------------------------------------------
+*/
 
 app.post("/api/orders", async (req, res) => {
   try {
@@ -217,7 +319,10 @@ app.post("/api/orders", async (req, res) => {
 
     return res.status(201).json(order);
   } catch (error) {
-    console.error(error);
+    console.error(
+      "Failed to create order:",
+      error
+    );
 
     return res.status(500).json({
       error: "Failed to create order",
@@ -225,87 +330,125 @@ app.post("/api/orders", async (req, res) => {
   }
 });
 
-app.post("/api/payments/checkout", async (req, res) => {
-  try {
-    const { orderId } = req.body;
+/*
+|--------------------------------------------------------------------------
+| Create Stripe Checkout Session
+|--------------------------------------------------------------------------
+*/
 
-    if (!orderId) {
-      return res.status(400).json({
-        error: "orderId is required",
-      });
-    }
+app.post(
+  "/api/payments/checkout",
+  async (req, res) => {
+    try {
+      const { orderId } = req.body;
 
-    const order = await prisma.order.findUnique({
-      where: {
-        id: Number(orderId),
-      },
-    });
+      if (!orderId) {
+        return res.status(400).json({
+          error: "orderId is required",
+        });
+      }
 
-    if (!order) {
-      return res.status(404).json({
-        error: "Order not found",
-      });
-    }
+      const order =
+        await prisma.order.findUnique({
+          where: {
+            id: Number(orderId),
+          },
+        });
 
-    if (order.status !== "PENDING") {
-      return res.status(400).json({
-        error: "Order is not available for payment",
-      });
-    }
+      if (!order) {
+        return res.status(404).json({
+          error: "Order not found",
+        });
+      }
 
-    const session = await stripe.checkout.sessions.create({
-      mode: "payment",
+      if (order.status !== "PENDING") {
+        return res.status(400).json({
+          error:
+            "Order is not available for payment",
+        });
+      }
 
-      line_items: [
-        {
-          price_data: {
-            currency: "inr",
+      const session =
+        await stripe.checkout.sessions.create({
+          mode: "payment",
 
-            product_data: {
-              name: `Order #${order.id}`,
+          line_items: [
+            {
+              price_data: {
+                currency: "inr",
+
+                product_data: {
+                  name: `Order #${order.id}`,
+                },
+
+                unit_amount: order.amount,
+              },
+
+              quantity: 1,
             },
+          ],
 
-            unit_amount: order.amount,
+          metadata: {
+            orderId: String(order.id),
           },
 
-          quantity: 1,
-        },
-      ],
+          success_url:
+            "http://localhost:3000/payment-success",
 
-      metadata: {
-        orderId: String(order.id),
-      },
+          cancel_url:
+            "http://localhost:3000/payment-cancelled",
+        });
 
-      success_url: "http://localhost:3000/payment-success",
+      return res.json({
+        checkoutUrl: session.url,
+      });
+    } catch (error) {
+      console.error(
+        "Failed to create checkout session:",
+        error
+      );
 
-      cancel_url: "http://localhost:3000/payment-cancelled",
-    });
+      return res.status(500).json({
+        error:
+          "Failed to create checkout session",
+      });
+    }
+  }
+);
 
-    return res.json({
-      checkoutUrl: session.url,
+/*
+|--------------------------------------------------------------------------
+| Start Server
+|--------------------------------------------------------------------------
+*/
+
+async function startServer() {
+  try {
+    // Test Redis
+    const redisResult = await redis.ping();
+
+    console.log(
+      "Redis ping:",
+      redisResult
+    );
+
+    // Connect RabbitMQ
+    await connectRabbitMQ();
+
+    // Start Express
+    app.listen(PORT, () => {
+      console.log(
+        `Server running on http://localhost:${PORT}`
+      );
     });
   } catch (error) {
-    console.error(error);
+    console.error(
+      "Failed to start server:",
+      error
+    );
 
-    return res.status(500).json({
-      error: "Failed to create checkout session",
-    });
+    process.exit(1);
   }
-});
+}
 
-
-
-redis
-  .ping()
-  .then((result) => {
-    console.log("Redis ping:", result);
-  })
-  .catch((error) => {
-    console.error("Redis ping failed:", error);
-  });
-
-const PORT = 4000;
-
-app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
-});
+startServer();
