@@ -21,6 +21,7 @@ app.post(
 
     let event: Stripe.Event;
 
+    // 1. Verify Stripe signature
     try {
       event = stripe.webhooks.constructEvent(
         req.body,
@@ -40,6 +41,7 @@ app.post(
     );
 
     try {
+      // 2. Store webhook event
       const webhookEvent = await prisma.webhookEvent.create({
         data: {
           eventId: event.id,
@@ -54,14 +56,83 @@ app.post(
         webhookEvent.eventId
       );
 
+      // 3. Process checkout completion
+      if (event.type === "checkout.session.completed") {
+        const session = event.data.object as Stripe.Checkout.Session;
+
+        const orderId = session.metadata?.orderId;
+
+        if (!orderId) {
+          console.error("No orderId found in Stripe session metadata");
+
+          await prisma.webhookEvent.update({
+            where: {
+              eventId: event.id,
+            },
+            data: {
+              status: "FAILED",
+              error: "Missing orderId in Stripe session metadata",
+            },
+          });
+
+          return res.status(400).json({
+            error: "Missing orderId",
+          });
+        }
+
+        // 4. Update order
+        await prisma.order.update({
+          where: {
+            id: Number(orderId),
+          },
+          data: {
+            status: "PAID",
+            providerPaymentId: session.payment_intent as string | null,
+          },
+        });
+
+        // 5. Mark webhook as processed
+        await prisma.webhookEvent.update({
+          where: {
+            eventId: event.id,
+          },
+          data: {
+            status: "PROCESSED",
+            processedAt: new Date(),
+          },
+        });
+
+        console.log(
+          `Order ${orderId} marked as PAID`
+        );
+      }
+
       return res.json({
         received: true,
       });
-    } catch (error) {
-      console.error("Failed to save webhook event:", error);
+
+    } catch (error: any) {
+
+      // Duplicate webhook
+      if (error?.code === "P2002") {
+        console.log(
+          "Duplicate webhook ignored:",
+          event.id
+        );
+
+        return res.json({
+          received: true,
+          duplicate: true,
+        });
+      }
+
+      console.error(
+        "Failed to process webhook:",
+        error
+      );
 
       return res.status(500).json({
-        error: "Failed to save webhook event",
+        error: "Failed to process webhook",
       });
     }
   }
