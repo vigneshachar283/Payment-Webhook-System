@@ -54,7 +54,7 @@ This project is designed to prevent those duplicate business effects.
 ### Current implementation
 
 ```text
-                                          ┌──────────────────┐
+                         ┌──────────────────┐
                          │      Client      │
                          │  Create Order    │
                          └────────┬─────────┘
