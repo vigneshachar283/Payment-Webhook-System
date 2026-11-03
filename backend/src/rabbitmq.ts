@@ -79,7 +79,6 @@ export async function connectRabbitMQ() {
 
   return channel;
 }
-
 export function getRabbitChannel() {
   if (!channel) {
     throw new Error(
