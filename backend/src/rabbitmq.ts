@@ -40,8 +40,7 @@ export async function connectRabbitMQ() {
   // Retry queue
   //
   // Messages stay here for 5 seconds.
-  // After 5 seconds RabbitMQ automatically
-  // sends them back to the main exchange.
+  /// sends them back to the main exchange.
   await channel.assertQueue(
     RETRY_QUEUE_NAME,
     {
