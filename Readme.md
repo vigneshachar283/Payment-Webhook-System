@@ -38,6 +38,7 @@ If the application processes every request independently, it could accidentally 
 
 For example:
 
+
 ```text
 Payment: ₹1000
 
