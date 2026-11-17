@@ -9,7 +9,6 @@ The main goal of this project is to handle unreliable and repeated payment webho
 
 ---
 
-
 ## 🎯 Problem Statement
 
 Payment providers such as Stripe can send the same webhook event multiple times.
